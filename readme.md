@@ -1,3 +1,6 @@
+<img src="https://github.com/adam-james-v/pottery/blob/main/avase.png" width="300">
+<img src="https://github.com/adam-james-v/pottery/blob/main/bvase.png" width="300">
+
 # Pottery
 
 Programmatic CAD project for creating pottery-like geometry.
