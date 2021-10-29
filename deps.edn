@@ -1,0 +1,5 @@
+{:deps 
+ {org.clojure/clojure            {:mvn/version "1.10.3"}
+  scad-clj/scad-clj              {:mvn/version "0.5.3"}
+  io.github.adam-james-v/forge   {:git/sha "0647a1445261e0c9c10d112877f0aa1d622e3688"}
+  io.github.adam-james-v/svg-clj {:mvn/version "0.0.7"}}}
