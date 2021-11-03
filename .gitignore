@@ -16,4 +16,5 @@ pom.xml.asc
 .shadow-cljs/
 _tmp.svg
 _tmp.png
+*.png
 *.txt

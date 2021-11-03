@@ -16,17 +16,6 @@
             [svg-clj.algorithms :as alg]
             [svg-clj.tools :as tools]))
 
-(defn shift-pts
-  [pts]
-  (let [start (first (sort-by (juxt first second) pts))
-        [back front] (split-with (complement #{start}) pts)]
-    (concat front back)))
-
-(defn simplify
-  [pts n]
-  (let [c (p/polygon pts)]
-    (mapv #(c (/ % (inc n))) (range n))))
-
 (defn show2D
   [sk]
   (let [pts (if (fn? sk)
@@ -39,11 +28,32 @@
                    :stroke-width 2})
         tools/cider-show)))
 
+(defn show-triangulation
+  [{:keys [tris]}]
+  (tools/cider-show
+   (for [tri tris]
+     (-> (el/polygon tri)
+         (tf/style {:fill "none" :stroke "white"})))))
+
 (defn blend-extrude-fn
   [curves z]
   (let [bf #(p/multiblend curves su/ease-in-out-sin %)]
     (fn [u v]
       (vec (concat ((bf v) u) [(* z v)])))))
+
+(defn- lift-curve-to-3D
+  [curve]
+  (fn [t] (concat (curve t) [0])))
+
+(defn extrude-curve2d
+  [curve z]
+  (fn [u v]
+    (su/v+ (concat (curve u) [0]) [0 0 (* z v)])))
+
+(defn extrude-curve3d
+  [curve z]
+  (fn [u v]
+    (su/v+ (curve u) [0 0 (* z v)])))
 
 (defn- tri-indices
   [seg idx]
@@ -73,24 +83,31 @@
                             %)
                          tri)) 
         btris (-> #(surface (double (/ % useg)) 0)
-                  (map (range (inc useg)))
-                  alg/triangulate
+                  (map (range useg))
+                  (->> (map #(vec (drop-last %))))
+                  alg/clip-ears
                   :tri-indices
-                  (->> (map wrap-idx))
-                  (->> (map #(vec (reverse %)))))
+                  (->> (map wrap-idx)))
         tface-idx (* useg vseg)
         idx-offset (fn [tri] (mapv #(+ tface-idx %) tri))
         ttris (-> #(surface (double (/ % useg)) 1)
-                  (map (range (inc useg)))
-                  alg/triangulate
+                  (map (range useg))
+                  alg/clip-ears
                   :tri-indices
-                  (->> (map idx-offset)))]
+                  (->> (map idx-offset))
+                  (->> (map #(vec (reverse %)))))]
     (fm/polyhedron
      (remove nil? (map surf uvs))
-     #_(concat btris tris ttris)
-     (-> tris
+     (concat btris tris ttris)
+     #_(-> tris
          (conj (concat (range useg) [0]))
          (conj (reverse (concat (range tface-idx (+ tface-idx useg)) [tface-idx])))))))
+
+(def test-surf
+  (let [b (p/circle 200)]
+    (volume (extrude-curve b 100) 64)))
+
+(spit "pottery.scad" (scad/write test-surf))
 
 (defn- u-closed-surface
   [surface]
@@ -107,10 +124,19 @@
         tris (mapcat #(tri-indices seg %) (drop-last seg (range (inc (count uvs)))))]
     (fm/polyhedron (remove nil? (map surf uvs)) tris)))
 
-(defn- open-surface
-  [surface]
+(defn rect
+  [w h]
+  (let [[wh hh] (map #(/ % 2.0) [w h])
+        uline (p/line [(- wh) (- hh)] [(+ wh) (- hh)])
+        vline (p/line [(- wh) (- hh)] [(- wh) (+ hh)])]
+    (fn [u v]
+      [(first (uline u))
+       (second (vline v))
+       0])))
+      
+(defn open-surface
+  [surface seg]
   (let [eps 0.00001
-        seg 64
         useg seg
         vseg useg
         ustep (double (/ 1 useg))
@@ -118,10 +144,67 @@
         uvs (map #(vec (reverse %))
                  (p/rect-grid (inc useg) (inc vseg) ustep vstep))
         trifn (fn [idx]
-                [[idx (+ idx (inc useg)) (inc idx)]
-                 [(inc idx) (+ 1 idx useg) (+ 2 idx useg)]])
-        tris (mapcat trifn (drop-last seg (range (inc (count uvs)))))]
+                (when-not (and (not= 0 idx) (= 0 (int (mod (inc idx) (inc seg)))))
+                  [[idx (+ idx (inc useg)) (inc idx)]
+                   [(inc idx) (+ 1 idx useg) (+ 2 idx useg)]]))
+        tris (drop-last 2 (remove nil? (mapcat trifn (drop-last seg (range (inc (count uvs)))))))]
     (fm/polyhedron (map #(apply surface %) uvs) tris)))
+
+(defn bounding-curve
+  [surface]
+  {})
+
+(defn extrude-surface
+  [surface h]
+  {})
+
+(def rect-surface
+  (-> (p/line [0 0 10] [100 200 -20])
+      #_(p/bezier [[0 0] [120 -160] [100 200]])
+      #_(p/fn-offset (p/sinwave 10 17))
+      (extrude-curve3d 200)
+      (open-surface 20)))
+
+(spit "pottery.scad" (scad/write rect-surface))
+
+(defn surface-normal
+  [surface [u v]]
+  (let [eps 0.00001
+        uvs (->> (p/regular-polygon-pts eps 3)
+                 (map #(su/v+ % [u v])))
+        pts (map #(apply surface %) uvs)]
+    (su/normalize (apply su/normal pts)))) 
+
+(defn offset-surface
+  [surf t]
+  (fn [u v]
+    (let [pt (surf u v)
+          n (surface-normal surf [u v])
+          v (su/v* n (repeat t))]
+      (su/v+ pt v))))
+
+(defn offset-surface-volume
+  [surf t seg]
+  (let [btris (open-surface surf seg)
+        ttris (open-surface (offset-surface surf t) seg)]
+    [btris ttris]))
+
+(defn bezier-patch
+  [apts bpts cpts dpts]
+  (let [curves (map p/bezier [apts bpts cpts dpts])]
+    (fn [u v]
+      (let [curve (p/bezier (map #(% u) curves))]
+        (curve v)))))
+
+(def patch
+  (-> (bezier-patch
+       [[0 0 0] [100 0 0] [200 0 0] [300 0 0]]
+       [[10 100 0] [100 100 250] [200 100 -250] [300 100 -20]]
+       [[-120 200 0] [100 200 -350] [200 200 250] [300 200 90]]
+       [[0 300 0] [100 300 0] [200 300 0] [300 300 0]])
+      (open-surface 60)))
+
+(spit "pottery.scad" (scad/write patch))
 
 (defn vase
   [shapes h t seg]
@@ -146,25 +229,25 @@
 (def a-vase
   (let [b (-> (p/regular-polygon-pts 150 9)
               (p/fillet-pts 40)
-              (simplify 400)
+              (p/simplify 400)
               p/polygon)
         m (-> (p/regular-polygon-pts 150 6)
               (p/fillet-pts 40)
-              (simplify 400)
+              (p/simplify 400)
               p/polygon)
         t (-> (p/regular-polygon-pts 150 3)
               (p/fillet-pts 40)
-              (simplify 400)
+              (p/simplify 400)
               p/polygon)]
-    (vase [b m t] 350 10 50)))
+    (vase [b #_m t] 350 10 20)))
 
 (def b-vase
   (let [h 400
         t 16
-        seg 100
+        seg 50
         bs (-> (p/regular-polygon-pts 140 6)
                (p/fillet-pts 50)
-               (simplify 400)
+               (p/simplify 400)
                p/polygon)
         ts (-> (p/circle 160)
                (p/rotate 90)
@@ -172,7 +255,7 @@
         ibs (p/fn-offset bs (fn [_] t))
         its (-> (p/circle (- 160 t))
                 (p/rotate 90)
-                (p/fn-offset (p/sinwave 3 60)))
+                (p/fn-offset (fn [_] t)))
         width (-> #(map % (range 0 1 0.05))
                   (mapcat [bs ts])
                   su/bb-dims
@@ -190,4 +273,4 @@
        (-> (fm/box width width h)
            (fm/translate [0 0 (+ (* h 0.5) t)]))))))
 
-(spit "pottery.scad" (scad/write a-vase))
+(spit "pottery.scad" (scad/write b-vase))
